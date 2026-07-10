@@ -211,7 +211,34 @@ def parse_args(argv):
     if opts.pass_fd is not None and "--passphrase-file" in opts.pass_opts:
         raise UsageError(
             "--passphrase-fd and --passphrase-file are mutually exclusive")
+
+    # A "-" input reads standard input.  When that is an interactive terminal
+    # the user almost certainly forgot -i/-c: gisp would prompt for the
+    # password on /dev/tty and then block waiting for the data to be typed in,
+    # with no prompt -- indistinguishable from a hang.  Refuse instead.
+    if opts.mode == "hide":
+        _reject_tty_input(opts.carrier, "the carrier PNG", "-c")
+        _reject_tty_input(opts.infile, "the secret to hide", "-i")
+    elif opts.mode == "extract":
+        _reject_tty_input(opts.infile, "the stego PNG", "-i")
+    elif opts.mode == "capacity":
+        _reject_tty_input(opts.carrier, "the carrier PNG", "-c")
     return opts
+
+
+def _stdin_is_tty():
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, OSError):
+        return False
+
+
+def _reject_tty_input(path, role, option):
+    """Refuse to read PATH from an interactive terminal (a silent-hang trap)."""
+    if is_stdio(path) and _stdin_is_tty():
+        raise UsageError(
+            "%s would be read from the terminal; pass %s FILE, or feed data on "
+            "standard input with a pipe or '< file'" % (role, option))
 
 
 # --------------------------------------------------------------------------
