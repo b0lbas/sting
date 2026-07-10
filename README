@@ -1,0 +1,77 @@
+sting -- authenticated PNG steganography built on gisp
+======================================================
+
+sting hides a secret inside a PNG image. The secret is
+never embedded in the clear: it is first encrypted by gisp
+(XChaCha20-Poly1305 with an Argon2id-derived key), and only the resulting
+opaque container is scattered across the carrier's pixels.
+
+
+Requirements
+------------
+
+  * Python 3
+  * Pillow            (PNG decode/encode)   -- MIT-CMU licence
+  * NumPy             (vectorised LSB math) -- BSD-3-Clause licence
+  * gisp              (the encryption back end)
+
+
+Building and installing
+-----------------------
+
+sting is pure Python; "building" only generates the launcher script.
+
+    make                 # create build/sting
+    make check           # run the self-test (uses gisp if it is found)
+    sudo make install    # install under /usr/local by default
+
+    make install prefix=$HOME/.local     # a home-directory install
+    make uninstall                       # remove it again
+
+To run straight from a checkout without installing, just use ./sting, or
+  python3 -m stinglib.
+
+Usage
+-----
+
+    sting --hide    -c cover.png -i secret.txt -o image.png
+    sting --extract -i image.png -o secret.txt
+    sting --capacity -c cover.png
+
+A path of '-' selects standard input or standard output, and the passphrase
+options are forwarded to gisp, so sting drops into the same pipelines:
+
+    tar c dir | sting -H -c cover.png -i - -o - --passphrase-fd 3 3<key > s.png
+    sting -X -i - -o - --passphrase-fd 3 3<key < s.png | tar x
+
+See the manual page sting(1) for the full option list.
+
+Layout
+------
+
+    sting            run-in-place launcher
+    sting.in         template for the installed launcher (Makefile fills it)
+    stinglib/        the Python package
+      constants.py     identity, exit codes, container format
+      errors.py        exception types that steer exit status
+      keystream.py     SHAKE-256 permutations and bit helpers
+      carrier.py       PNG decode/encode and the usable-sample model
+      stego.py         the embed / extract core
+      backend.py       the gisp subprocess boundary
+      streams.py       stdin/stdout- and file-aware byte I/O
+      cli.py           argument parsing and the mode handlers
+    tests/run-tests.py self-test
+    sting.1          manual page
+    Makefile         build/install
+    COPYING          the GNU General Public License, version 3
+
+Licence
+-------
+
+Copyright (C) 2026 Uladzislau Bolbas.
+
+sting is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.  There is NO WARRANTY, to the extent permitted by law.  See the
+COPYING file for the full license text.
