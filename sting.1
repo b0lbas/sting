@@ -161,6 +161,18 @@ directly; palette and 1-bit images are promoted to true colour first, so the
 stego output is a normal true-colour PNG (and therefore larger than a palette
 original).  16-bit images are refused.  Only colour channels are used, never
 alpha, and samples of fully transparent pixels are skipped.
+.SH "OUTPUT FILES"
+A named output is written to a temporary file in the same directory and then
+renamed into place, so a reader never observes a partial result.  The
+permissions differ by role.  A secret recovered by \fB\-\-extract\fR is created
+mode 0600, matching
+.BR gisp (1),
+so the plaintext is private from the moment it exists.  A stego image written
+by \fB\-\-hide\fR instead takes the ordinary umask default, because a picture
+that alone among its neighbours is readable only by its owner is precisely the
+anomaly the rest of sting works to avoid; if the output already exists, its
+current mode is preserved.  Writing to standard output, or to a target that is
+not a regular file, changes no permissions at all.
 .SH "EXIT STATUS"
 .TP
 .B 0

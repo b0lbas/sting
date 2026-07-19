@@ -25,6 +25,7 @@ be found, a full command-line round-trip is added on top.
 
 import io
 import os
+import stat
 import sys
 import tempfile
 import tracemalloc
@@ -37,7 +38,7 @@ sys.path.insert(0, _ROOT)
 import numpy as np
 from PIL import Image
 
-from stinglib import backend, cli
+from stinglib import backend, cli, streams
 from stinglib.carrier import load_carrier
 from stinglib.constants import HDR_LEN, KEY_HEADER_DIR, MAGIC, MAX_RATIO
 from stinglib.errors import StingError
@@ -150,6 +151,36 @@ def test_crafted_length_is_bounded():
         if extract(load_carrier(stego), stego_key=key) != secret:
             ok = False
     check("payload at exactly capacity still round-trips", ok)
+
+
+def test_output_permissions():
+    """Stego images blend in; recovered secrets stay private.
+
+    A 0600 picture sitting among 0644 neighbours is exactly the anomaly the
+    metadata stripping works to avoid, so --hide output takes the umask
+    default.  A recovered secret keeps mkstemp's 0600, matching gisp.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        mask = os.umask(0o022)
+        os.umask(mask)
+        expected = 0o666 & ~mask
+
+        public = os.path.join(d, "stego.png")
+        private = os.path.join(d, "secret.bin")
+        streams.write_bytes(public, b"image", private=False)
+        streams.write_bytes(private, b"secret")
+        check("stego output follows the umask",
+              stat.S_IMODE(os.stat(public).st_mode) == expected)
+        check("recovered secret stays 0600",
+              stat.S_IMODE(os.stat(private).st_mode) == 0o600)
+
+        # An existing file keeps whatever mode it already had.
+        kept = os.path.join(d, "kept.png")
+        open(kept, "wb").close()
+        os.chmod(kept, 0o640)
+        streams.write_bytes(kept, b"image", private=False)
+        check("existing output keeps its mode",
+              stat.S_IMODE(os.stat(kept).st_mode) == 0o640)
 
 
 def test_capacity_exceeded():
@@ -370,6 +401,7 @@ def main():
     test_lsb_matching_and_density()
     test_no_payload_and_tamper()
     test_crafted_length_is_bounded()
+    test_output_permissions()
     test_capacity_exceeded()
     test_palette_promotion()
     test_png_fingerprint()

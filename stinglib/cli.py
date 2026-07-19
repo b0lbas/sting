@@ -348,7 +348,9 @@ def do_hide(opts):
         raise StingError("gisp produced no ciphertext")
 
     stego = embed(carrier, ciphertext, opts.ratio, stego_key)
-    write_bytes(opts.output, stego)
+    # The stego image is meant to pass as an ordinary picture, so it takes the
+    # umask default rather than the private 0600 a recovered secret gets.
+    write_bytes(opts.output, stego, private=False)
     if not opts.quiet:
         hbits = header_bits(stego_material(stego_key))
         sys.stderr.write(

@@ -20,6 +20,15 @@
 A path of "-" selects standard input or standard output, mirroring gisp so
 sting drops into the same pipelines.  Named outputs are written through a
 temporary file and an atomic rename so a reader never sees a partial result.
+
+Because that staging file comes from mkstemp it is created 0600, and the
+rename carries the mode across.  That is the right default for a recovered
+secret -- it matches gisp, which creates its own output 0600 deliberately so
+the plaintext is private from the moment it exists -- but it is wrong for a
+stego image, whose whole purpose is to be indistinguishable from an ordinary
+photograph sitting in the same directory.  A file that alone among its
+neighbours is readable only by its owner is exactly the anomaly the rest of
+sting works to avoid.  Callers therefore choose per output: see PRIVATE.
 """
 
 import os
@@ -65,8 +74,34 @@ def _is_regular_target(path):
         return True
 
 
-def write_bytes(path, data):
-    """Write DATA to standard output, or atomically to a named file."""
+def _default_file_mode(path):
+    """The permission bits a plain ``open(path, "wb")`` would leave on PATH.
+
+    An existing file keeps the mode it already has, matching the truncate-in-
+    place write that the atomic rename stands in for; a new one gets 0666
+    masked by the process umask.  Reading the umask means momentarily setting
+    it, which is safe here only because sting is single-threaded and does not
+    fork in between.
+    """
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mask = os.umask(0)
+        os.umask(mask)
+        return 0o666 & ~mask
+
+
+def write_bytes(path, data, private=True):
+    """Write DATA to standard output, or atomically to a named file.
+
+    PRIVATE selects the permissions of a newly created named file.  The
+    default, True, leaves the 0600 that mkstemp creates, which is what a
+    recovered secret wants.  Pass False for output that must look like any
+    other file of its kind -- notably the stego image -- and it is given the
+    mode a plain open() would have produced instead.  Neither setting applies
+    to standard output or to a non-regular target, where the caller owns the
+    destination and sting does not create it.
+    """
     if is_stdio(path):
         try:
             sys.stdout.buffer.write(data)
@@ -96,6 +131,14 @@ def write_bytes(path, data):
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".sting-")
     except OSError as exc:
         raise StingError("cannot create a temporary file: %s" % exc)
+    if not private:
+        # Widen mkstemp's 0600 to what an ordinary create would have given.
+        # A failure here is not worth aborting a good write over: the file
+        # merely stays more restrictive than asked, which errs safely.
+        try:
+            os.fchmod(fd, _default_file_mode(path))
+        except OSError:
+            pass
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
