@@ -48,7 +48,7 @@ from .constants import (HDR_LEN, KEY_HEADER_DIR, KEY_HEADER_DIR_KEYED,
                         KEY_HEADER_POS, KEY_HEADER_POS_KEYED, KEY_PAYLOAD_DIR,
                         KEY_PAYLOAD_DIR_KEYED, KEY_PAYLOAD_POS,
                         KEY_PAYLOAD_POS_KEYED, KEYED_HDR_LEN, MAGIC,
-                        STEGO_KEY_TAG)
+                        MAX_RATIO, STEGO_KEY_TAG)
 from .errors import StingError
 from .keystream import (bits_to_bytes, bytes_to_bits, directions,
                         permutation_prefix)
@@ -200,10 +200,16 @@ def extract(carrier, stego_key=None):
     header = bits_to_bytes(carrier.read(hslots))
     seed, length = _parse_header(sk, header)
 
-    # Defence in depth: never trust a length the carrier physically cannot
-    # hold.  In KEYED mode this is also what rejects most wrong keys, whose
-    # random length field is overwhelmingly out of range.
-    if length * 8 > n - hbits:
+    # Defence in depth: never trust a length the carrier could not legitimately
+    # hold.  The bound is the capacity at MAX_RATIO -- the absolute ceiling
+    # embed() enforces, so no genuine payload can exceed it -- and not the raw
+    # sample count, which is some 33x looser.  A header claiming a payload that
+    # fills the whole image would otherwise make us materialise slot arrays for
+    # it before anything else could object, so this is what keeps a crafted
+    # stego PNG from turning into a memory and CPU exhaustion vector.  In KEYED
+    # mode the same bound is also what rejects most wrong keys, whose random
+    # length field is overwhelmingly out of range.
+    if length > carrier.capacity_bytes(MAX_RATIO, hbits):
         raise StingError(_KEYED_MISS if sk is not None
                          else "embedded length is impossible for this carrier")
 

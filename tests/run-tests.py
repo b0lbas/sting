@@ -28,6 +28,7 @@ import os
 import sys
 import tempfile
 import tracemalloc
+import zlib
 
 # Run against the in-tree package regardless of the working directory.
 _ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -38,10 +39,11 @@ from PIL import Image
 
 from stinglib import backend, cli
 from stinglib.carrier import load_carrier
-from stinglib.constants import MAX_RATIO
+from stinglib.constants import HDR_LEN, KEY_HEADER_DIR, MAGIC, MAX_RATIO
 from stinglib.errors import StingError
-from stinglib.keystream import permutation_prefix
-from stinglib.stego import _header_slots, embed, extract, stego_material
+from stinglib.keystream import bytes_to_bits, directions, permutation_prefix
+from stinglib.stego import (_header_slots, embed, extract, header_bits,
+                            stego_material)
 
 _failures = 0
 
@@ -109,6 +111,45 @@ def test_no_payload_and_tamper():
         check("tampered image is rejected", False)
     except StingError:
         check("tampered image is rejected", True)
+
+
+def test_crafted_length_is_bounded():
+    """A header may not claim more than the MAX_RATIO capacity.
+
+    The bound must be the capacity ceiling, not the raw sample count: a
+    crafted header claiming a payload that fills the whole image would
+    otherwise make extract() materialise slot arrays for it, turning a stego
+    PNG into a memory and CPU exhaustion vector.
+    """
+    raw = _png_bytes("RGB", size=(400, 400))
+    carrier = load_carrier(raw)
+    n = carrier.n_usable
+    hbits = HDR_LEN * 8
+
+    # Forge an open-mode header (MAGIC + valid CRC) declaring a payload that
+    # occupies nearly every usable sample -- ~33x what embed() would ever emit.
+    length = (n - hbits) // 8
+    hdr = MAGIC + bytes([0, 0]) + os.urandom(16) + length.to_bytes(8, "big")
+    hdr += (zlib.crc32(hdr) & 0xFFFFFFFF).to_bytes(4, "big")
+    carrier.write(_header_slots(n, None), bytes_to_bits(hdr),
+                  directions(KEY_HEADER_DIR, hbits))
+    try:
+        extract(load_carrier(carrier.to_png_bytes()))
+        check("crafted oversize length is rejected", False)
+    except StingError:
+        check("crafted oversize length is rejected", True)
+
+    # ...while a legitimately maximal payload must still round-trip, in both
+    # modes, so the new bound cannot be off by a byte.
+    ok = True
+    for key in (None, b"a-stego-key"):
+        hb = header_bits(stego_material(key))
+        cap = load_carrier(raw).capacity_bytes(MAX_RATIO, hb)
+        secret = os.urandom(cap)
+        stego = embed(load_carrier(raw), secret, MAX_RATIO, stego_key=key)
+        if extract(load_carrier(stego), stego_key=key) != secret:
+            ok = False
+    check("payload at exactly capacity still round-trips", ok)
 
 
 def test_capacity_exceeded():
@@ -328,6 +369,7 @@ def main():
     test_roundtrip_modes()
     test_lsb_matching_and_density()
     test_no_payload_and_tamper()
+    test_crafted_length_is_bounded()
     test_capacity_exceeded()
     test_palette_promotion()
     test_png_fingerprint()
