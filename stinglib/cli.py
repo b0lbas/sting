@@ -83,6 +83,11 @@ Resource ceilings, forwarded to gisp when extracting:
   -h, --help               Display this help and exit
   -v, --version            Display version information and exit
 
+Environment:
+  STING_GISP               Path to the gisp executable, used when -g is not
+                           given.  An explicitly requested backend is never
+                           silently replaced by one found on PATH.
+
 Report bugs to: <%(bug)s>
 """ % {"prog": PROGRAM_NAME, "bug": BUG_ADDRESS}
 
