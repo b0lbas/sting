@@ -329,12 +329,23 @@ def do_capacity(opts):
     sys.stdout.write(
         "carrier:  %dx%d %s\n"
         "usable:   %d samples\n"
-        "ratio:    %.3f\n"
+        "ratio:    %.4f\n"
         "mode:     %s\n"
         "capacity: %d bytes (payload after gisp encryption overhead)\n"
         % (width, height, carrier.mode, carrier.n_usable, opts.ratio,
            "keyed (stealth)" if stego_key is not None else "open (detectable)",
            capacity))
+    # A zero here is a real answer, not an error, so the exit status stays 0 --
+    # but say plainly that the combination is unusable rather than leave the
+    # user to rediscover it as a failure at --hide time.  Warnings survive
+    # --quiet; only progress chatter is suppressed by it.
+    if capacity == 0:
+        sys.stderr.write(
+            "%s: warning: this carrier holds nothing at ratio %.4f -- the %d-"
+            "byte %s header alone exceeds the budget; --hide would fail.  Use "
+            "a larger carrier, or raise --ratio (max %.4f).\n"
+            % (PROGRAM_NAME, opts.ratio, hbits // 8,
+               "keyed" if stego_key is not None else "open", MAX_RATIO))
     return EXIT_OK
 
 
