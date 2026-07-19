@@ -1,0 +1,149 @@
+sting TODO
+==========
+
+Open items and ideas.  Nothing here is a promise; it is a place to record
+intent so it is not lost.  Items are roughly ordered by severity within each
+section.  Security reports go to the address in README, not here.
+
+Correctness
+-----------
+
+  * KeyboardInterrupt during proc.communicate() leaks the gisp child.
+    backend.py only catches OSError before calling proc.kill(), so Ctrl-C while
+    gisp is grinding through Argon2id propagates straight past and leaves the
+    subprocess running with the passphrase descriptor still open.  cli.main
+    catches the interrupt and exits, orphaning it.
+
+  * write_bytes mishandles a symlinked output.  _is_regular_target uses
+    os.stat, which follows the link, so a symlink to a regular file takes the
+    atomic-rename path -- but os.replace then replaces the symlink itself
+    rather than its target.  The check and the action disagree about what the
+    path means.  Decide which behaviour is wanted and make both agree.
+
+  * Repeated options silently take the last value.  "--stego-key a
+    --stego-key b" is accepted and uses b, which in a tool where a wrong
+    stego-key is designed to be indistinguishable from no payload means the
+    user gets the generic miss message and no hint why.  Every other conflict
+    (--stego-key vs --stego-key-file, --passphrase-fd vs --passphrase-file) is
+    a hard error; these should be too.  Repeating -p/-m likewise forwards
+    --opslimit to gisp twice and relies on its last-wins behaviour.
+
+  * --ratio is accepted and silently ignored by --extract.  It is meaningful
+    only for --hide and --capacity; reject it elsewhere.
+
+  * --passphrase-fd 1 and 2 collide with the pipes Popen creates.  _run_gisp
+    sets stdout=PIPE and stderr=PIPE, so the child's descriptors 1 and 2 are
+    those pipes and pass_fds cannot preserve the caller's.  gisp would read the
+    passphrase from a pipe write-end.  Reject 1 and 2 up front; note also that
+    _positive_int is named for a positivity it does not enforce, accepting 0.
+
+  * tools/highlight-payload crashes with a traceback on a trailing flag.  The
+    hand-rolled parser calls bare next(it), so "--radius" with no value raises
+    StopIteration out of main.
+
+  * The BrokenPipeError handler may still emit shutdown noise.  cli.main closes
+    sys.stdout, but the interpreter's final flush can print "Exception ignored
+    in: <_io.BufferedWriter...>".  The usual remedy is an os.dup2 onto
+    /dev/null.  Unconfirmed -- reproduce before changing anything.
+
+  * Open-mode FLAGS and RESERVED are written but never read.  _parse_header
+    ignores bytes 4-5, so a future container revision cannot be detected: a
+    hypothetical v3 payload would be misparsed as v2 rather than refused.
+
+Security and design
+-------------------
+
+  * The stego-key is passed in argv, where it is visible in ps output and
+    shell history.  gisp's own secret has --passphrase-fd; sting's has no
+    --stego-key-fd, and neither the usage text nor sting(1) warns that
+    --stego-key-file is the only safe form.
+
+  * Keyed header placement depends only on the stego-key and the usable-sample
+    count.  _header_pos_key mixes in the key material but not the per-image
+    seed, unlike _payload_pos_key, so every image of a given size embedded
+    under one stego-key puts its header in the identical slots.  An adversary
+    holding several such images can correlate the touched-sample sets across
+    them without the key -- a partial erosion of exactly the "nothing to
+    recognise" property keyed mode is sold on.  Mixing the seed into the header
+    keys is not possible directly (the seed lives in the header), so this needs
+    thought: a two-stage locator, or accepting and documenting the limit.
+
+  * locate_gisp hardcodes ~/Scripts/gisp/src/gisp, a personal checkout path
+    shipped in installed code.  For a tool whose security rests entirely on a
+    specific vetted backend, silently accepting a binary from a user-writable
+    home directory is also a weaker default than the surrounding docstring's
+    careful reasoning about explicit backends implies.
+
+  * cli.main has no catch-all.  MemoryError, or anything Pillow and NumPy raise
+    that is neither OSError nor ValueError, reaches the user as a raw traceback
+    with filesystem paths in it.
+
+Performance
+-----------
+
+  * Carrier.usable is always materialised, and for L and RGB carriers it is
+    merely arange(npix * channels) -- an int64 array up to 1 GB at the sample
+    cap, holding no information at all.  Even with an alpha channel the per-
+    channel parts are already individually sorted, so the np.sort over their
+    concatenation is avoidable O(n log n) work.  This is now the dominant
+    memory cost, which constants.py acknowledges but treats as a fact of life
+    rather than as the thing to fix.
+
+  * read_bytes slurps the whole input before any size check runs, so the
+    MAX_CARRIER_SAMPLES guard protects against a large decoded image but not
+    against a large file.
+
+Refactoring and internal cleanup
+--------------------------------
+
+  * tools/highlight-payload is a second, divergent implementation of the
+    extract path.  It imports the privates _header_slots and _payload_slots,
+    then reimplements _parse_header, _resolve_stego_key (including its
+    CRLF-stripping rules) and MODE_LAYOUT's channel counts.  Four independent
+    drift risks; a container-format change silently breaks the tool.  Give it a
+    supported entry point in stinglib instead.
+
+  * carrying_pixels and _pixel_coords in highlight-payload are the same
+    function, differing only by an np.unique.
+
+  * Mode validation is duplicated between _normalise_mode and Carrier.__init__,
+    with two differently worded messages for one condition; the second is
+    unreachable for anything the first admits.
+
+  * _resolve_stego_key lives in cli.py but is a stego-layer concern -- which is
+    why highlight-payload had to copy it.  It belongs beside stego_material.
+
+  * capacity_bytes(ratio, header_bits=HDR_BITS) has a default that is wrong for
+    keyed mode, and every real caller passes the argument.  The default exists
+    only to be a latent bug; drop it.
+
+  * _run_gisp's stdin selection is convoluted: a three-way branch, a caller
+    passing "None if passthrough else b''", and "stdin is subprocess.PIPE" --
+    an identity comparison on an int that works only via CPython's small-int
+    cache.  The input_bytes/stdin_passthrough pair encodes one tri-state across
+    two parameters.
+
+  * parse_args is a ~75-line if/elif chain.  The kdf_opts and ceil_opts
+    pass-through groups are pure table data and would collapse to a dict.
+
+  * Options is a bare class with thirteen attributes, no validation and no
+    __repr__.  A dataclass would say the same thing in a third of the space.
+
+  * constants._program_name() runs at import time off sys.argv[0], so importing
+    stinglib as a library picks up the host program's name for every
+    diagnostic sting subsequently prints.
+
+Repository hygiene
+------------------
+
+  * Nine .pyc files are tracked in git and there is no .gitignore.  They churn
+    on every Python version bump, and "make clean" removes __pycache__ -- so
+    running the documented clean target stages nine deletions.
+
+--------------------------------------------------------------------------------
+
+Copyright (C) 2026 Uladzislau Bolbas <cmrtumilovic@gmail.com>
+
+Copying and distribution of this file, with or without modification, are
+permitted in any medium without royalty provided the copyright notice and this
+notice are preserved.  This file is offered as-is, without any warranty.
