@@ -38,6 +38,20 @@ Usage
     sting --extract -i image.png -o secret.txt
     sting --capacity -c cover.png
 
+Without a stego-key the embedding is DETECTABLE: the header sits at a fixed
+location with a constant marker, so anyone with sting can tell a payload is
+present (the contents stay encrypted).  Add a stego-key -- an independent
+secret, never the gisp passphrase -- to place the data by a secret-derived
+layout with nothing to recognise; a wrong stego-key then looks like a clean
+image:
+
+    sting --hide    -c cover.png -i secret.txt -o image.png --stego-key-file k
+    sting --extract -i image.png -o secret.txt              --stego-key-file k
+
+Concealment never survives an adversary who also has the original cover: a
+pixel diff reveals every changed sample.  That is a limit of all
+carrier-modifying steganography, not of sting specifically.
+
 A path of '-' selects standard input or standard output, and the passphrase
 options are forwarded to gisp, so sting drops into the same pipelines:
 

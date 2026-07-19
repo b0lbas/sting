@@ -41,15 +41,35 @@ file-encryption utility.  A secret is first encrypted by gisp using
 XChaCha20-Poly1305 authenticated encryption with an Argon2id-derived key, and
 only the resulting opaque container is scattered across the carrier image.
 .PP
-Confidentiality and integrity come entirely from gisp:
+Content confidentiality and integrity come entirely from gisp:
 .B sting
 treats the ciphertext as an opaque blob and never sees, derives, or stores the
-passphrase.  Statistical undetectability comes from touching at most 3% of the
-carrier's usable colour samples and from using LSB
+passphrase.  This holds unconditionally.
+.PP
+.I Stealth
+\(em concealing that a payload exists at all \(em is a weaker, conditional
+property.  Without a stego-key
+.B sting
+runs in a
+.B detectable
+mode: the header sits at a fixed, public location and carries a constant
+marker, so anyone with
+.B sting
+can confirm a payload is present (its contents stay encrypted).  Supply a
+.B \-\-stego\-key
+to place the header and payload by a secret-derived layout instead, leaving
+nothing to recognise; a wrong stego-key then looks exactly like a clean image.
+Even so, touching at most 3% of the usable colour samples and using LSB
 .I matching
-(\(+-1 embedding) rather than LSB replacement, which avoids the pair-of-values
-histogram signature and spreads the changes across the whole image by a keyed
-pseudo-random permutation.
+(\(+-1 embedding) rather than LSB replacement only
+.I lowers
+the statistical signal that steganalysis looks for; it does not make the
+channel provably undetectable.  No scheme conceals a payload from an adversary
+who also holds the original carrier, since a pixel-wise diff reveals every
+changed sample; that comparison is outside
+.BR sting 's
+threat model.  The stego-key is an independent secret and is never the gisp
+passphrase, nor is it forwarded to gisp.
 .PP
 A path of
 .B \-
@@ -81,6 +101,16 @@ Where to write the result.  Default is \fB\-\fR.
 \fB\-\-ratio\fR \fIFRACTION\fR
 Ceiling on the fraction of samples that may be modified.  Must satisfy
 0 < r <= 0.03; the default and maximum is 0.03 (3%).
+.SS Stealth (sting's own secret, never forwarded to gisp)
+.TP
+\fB\-\-stego\-key\fR \fISTR\fR
+Place the header and payload by a layout keyed with the secret \fISTR\fR, so
+the embedding cannot be located or confirmed without it.  Both hiding and
+extracting must use the same key.  This is separate from the gisp passphrase.
+.TP
+\fB\-\-stego\-key\-file\fR \fIFILE\fR
+Read the stego-key from \fIFILE\fR (a single line; one trailing newline is
+stripped).  Mutually exclusive with \fB\-\-stego\-key\fR.
 .SS Passphrase (forwarded to gisp)
 .TP
 \fB\-\-passphrase\-fd\fR \fIN\fR

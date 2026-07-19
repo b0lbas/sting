@@ -40,9 +40,10 @@ import numpy as np
 from PIL import Image
 
 from stinglib.carrier import load_carrier
-from stinglib.constants import HDR_LEN, MAGIC
+from stinglib.constants import MAGIC
 from stinglib.keystream import bits_to_bytes
-from stinglib.stego import _header_slots, _payload_slots
+from stinglib.stego import (_header_slots, _payload_slots, header_bits,
+                            stego_material)
 
 # Samples per pixel for each carrier mode.
 _CHANNELS = {"L": 1, "LA": 2, "RGB": 3, "RGBA": 4}
@@ -67,6 +68,8 @@ def parse_args(argv):
     a.lighten = 0.6
     a.show_header = True
     a.by_bit = False
+    a.stego_key = None
+    a.stego_key_file = None
     it = iter(argv)
     positional = []
     for arg in it:
@@ -80,6 +83,10 @@ def parse_args(argv):
             a.show_header = False
         elif arg == "--by-bit":
             a.by_bit = True
+        elif arg == "--stego-key":
+            a.stego_key = next(it)
+        elif arg == "--stego-key-file":
+            a.stego_key_file = next(it)
         elif arg in ("-h", "--help"):
             sys.stdout.write(__doc__)
             raise SystemExit(0)
@@ -87,9 +94,32 @@ def parse_args(argv):
             positional.append(arg)
     if len(positional) != 2:
         die("usage: highlight-payload STEGO.png OUT.png [--by-bit] "
-            "[--radius N] [--dim F] [--lighten F] [--no-header]")
+            "[--radius N] [--dim F] [--lighten F] [--no-header] "
+            "[--stego-key STR | --stego-key-file F]")
     a.src, a.dst = positional
+    if a.stego_key is not None and a.stego_key_file is not None:
+        die("--stego-key and --stego-key-file are mutually exclusive")
     return a
+
+
+def resolve_key(a):
+    """Return the stego-key bytes for keyed images, or None for open ones."""
+    if a.stego_key is not None:
+        key = a.stego_key.encode("utf-8")
+    elif a.stego_key_file is not None:
+        try:
+            key = open(a.stego_key_file, "rb").read()
+        except OSError as exc:
+            die("cannot read stego-key file %s: %s" % (a.stego_key_file, exc))
+        if key.endswith(b"\r\n"):
+            key = key[:-2]
+        elif key.endswith((b"\n", b"\r")):
+            key = key[:-1]
+    else:
+        return None
+    if not key:
+        die("stego-key must not be empty")
+    return key
 
 
 def carrying_pixels(carrier, slots):
@@ -141,19 +171,28 @@ def main(argv):
     except Exception as exc:                  # noqa: BLE001 - report anything
         die("cannot load carrier: %s" % exc)
 
-    # Locate and validate the self-describing header.
+    # Locate the header.  In open mode it is self-describing (MAGIC + CRC); in
+    # keyed mode it can only be found with the stego-key and has nothing to
+    # verify, so a wrong key simply looks like an image with no payload.
+    sk = stego_material(resolve_key(a))
+    hlen = header_bits(sk) // 8
     n = carrier.n_usable
-    hslots = _header_slots(n)
+    hslots = _header_slots(n, sk)
     header = bits_to_bytes(carrier.read(hslots))
-    if header[:4] != MAGIC:
-        die("no sting payload found in %s (is it a stego image?)" % a.src)
-    if (zlib.crc32(header[:30]) & 0xFFFFFFFF) != int.from_bytes(
-            header[30:34], "big"):
-        die("header checksum failed: %s is corrupt or tampered" % a.src)
-
-    seed = header[6:22]
-    length = int.from_bytes(header[22:30], "big")
-    pslots = _payload_slots(n, seed, hslots, length * 8)
+    if sk is None:
+        if header[:4] != MAGIC:
+            die("no sting payload found in %s (is it a stego image?)" % a.src)
+        if (zlib.crc32(header[:30]) & 0xFFFFFFFF) != int.from_bytes(
+                header[30:34], "big"):
+            die("header checksum failed: %s is corrupt or tampered" % a.src)
+        seed = header[6:22]
+        length = int.from_bytes(header[22:30], "big")
+    else:
+        seed = header[0:16]
+        length = int.from_bytes(header[16:24], "big")
+        if length * 8 > n - header_bits(sk):
+            die("no payload found with this stego-key in %s" % a.src)
+    pslots = _payload_slots(n, sk, seed, hslots, length * 8)
 
     import io
     base = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"))
@@ -203,7 +242,7 @@ def main(argv):
         "footprint:%.3f%% of pixels carry payload\n"
         "written:  %s  (red = payload%s, on a %.0f%%-dimmed image)\n"
         % (a.src, carrier.size[0], carrier.size[1], carrier.mode,
-           length, p_rows.size, HDR_LEN,
+           length, p_rows.size, hlen,
            100.0 * p_rows.size / total_px, a.dst,
            ", cyan = header" if a.show_header else "", a.dim * 100))
     return 0

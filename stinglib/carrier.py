@@ -36,6 +36,38 @@ from .constants import (HDR_BITS, MAX_CARRIER_SAMPLES, MODE_LAYOUT,
 from .errors import StingError
 
 
+# The 8-byte PNG signature, and the only chunks a decoder needs for the modes
+# sting emits.  Everything else (metadata, timestamps, colour hints) is dropped
+# on output so the file carries no encoder fingerprint.  PLTE/tRNS are kept for
+# safety even though L/LA/RGB/RGBA output never uses them.
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_KEEP_CHUNKS = frozenset((b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"))
+
+
+def _strip_ancillary_chunks(png):
+    """Return PNG with every non-essential chunk removed.
+
+    Walks the chunk stream and keeps only ``_KEEP_CHUNKS``.  A malformed or
+    truncated stream is returned unchanged rather than risking corruption.
+    """
+    if png[:8] != _PNG_SIGNATURE:
+        return png
+    out = bytearray(_PNG_SIGNATURE)
+    i, n = 8, len(png)
+    while i + 12 <= n:                       # 4 length + 4 type + 4 CRC minimum
+        length = int.from_bytes(png[i:i + 4], "big")
+        end = i + 12 + length
+        if end > n:                          # truncated chunk: bail out safely
+            return png
+        ctype = png[i + 4:i + 8]
+        if ctype in _KEEP_CHUNKS:
+            out += png[i:end]
+        i = end
+        if ctype == b"IEND":
+            break
+    return bytes(out)
+
+
 class Carrier:
     """A decoded PNG in a form ready for LSB embedding or extraction."""
 
@@ -84,10 +116,14 @@ class Carrier:
     def n_usable(self):
         return int(self.usable.size)
 
-    def capacity_bytes(self, ratio):
-        """Maximum payload, in bytes, at the given change RATIO."""
+    def capacity_bytes(self, ratio, header_bits=HDR_BITS):
+        """Maximum payload, in bytes, at the given change RATIO.
+
+        HEADER_BITS is the size of the on-image header for the mode in use
+        (the open header by default; the keyed header is smaller).
+        """
         cap_bits = int(self.n_usable * ratio)
-        payload_bits = cap_bits - HDR_BITS
+        payload_bits = cap_bits - header_bits
         if payload_bits < 8:
             return 0
         return payload_bits // 8
@@ -112,11 +148,31 @@ class Carrier:
         return (self._flat[self.usable[slots]] & 1).astype(np.uint8)
 
     def to_png_bytes(self):
-        """Re-encode the (possibly modified) pixels as a PNG byte string."""
+        """Re-encode the (possibly modified) pixels as a PNG byte string.
+
+        The output is deliberately plain: it is built from the raw pixels alone
+        (so no source metadata rides along), encoded with one fixed compression
+        profile, and then passed through a chunk filter that keeps only the
+        chunks needed to decode the image.  The result carries no tEXt/iTXt/
+        zTXt, no tIME, no gAMA/cHRM/sRGB/iCCP, and no pHYs -- the ancillary
+        chunks that otherwise leak the producing tool, a timestamp, or an
+        original file's provenance.  The colour type and 8-bit depth are those
+        of ``self.mode`` (L, LA, RGB or RGBA), matching the carrier after any
+        palette/1-bit promotion done at load time.
+
+        This only removes an *encoder* fingerprint; it cannot make the file
+        byte-identical to what some other tool would have produced, and it is
+        no defence at all against an adversary who also holds the original
+        carrier: a pixel-wise diff then reveals the touched samples directly.
+        That comparison is outside sting's threat model (see stinglib's package
+        docstring).
+        """
         image = Image.frombytes(self.mode, self.size, self._arr.tobytes())
         buf = io.BytesIO()
-        image.save(buf, format="PNG", optimize=False)
-        return buf.getvalue()
+        # Fixed profile: maximum zlib level, no optimisation pass, and no
+        # pnginfo, so every carrier of a given mode is encoded the same way.
+        image.save(buf, format="PNG", optimize=False, compress_level=9)
+        return _strip_ancillary_chunks(buf.getvalue())
 
 
 def _normalise_mode(image, quiet):

@@ -25,10 +25,10 @@ import PIL
 
 from .backend import gisp_decrypt, gisp_encrypt, locate_gisp
 from .carrier import load_carrier
-from .constants import (BUG_ADDRESS, EXIT_FAIL, EXIT_OK, EXIT_USAGE, HDR_BITS,
+from .constants import (BUG_ADDRESS, EXIT_FAIL, EXIT_OK, EXIT_USAGE,
                         MAX_RATIO, PROGRAM_NAME, VERSION)
 from .errors import StingError, UsageError
-from .stego import embed, extract
+from .stego import embed, extract, header_bits, stego_material
 from .streams import is_stdio, read_bytes, write_bytes
 
 
@@ -42,6 +42,12 @@ encrypted with gisp (XChaCha20-Poly1305 / Argon2id) before being scattered,
 at most 3%% of the carrier's samples, across the image by LSB matching.
 A path of '-' selects standard input or standard output.
 
+Without a stego-key the embedding is DETECTABLE: the header sits at a fixed
+location and carries a constant marker, so anyone with sting can tell a
+payload is present (the secret itself stays encrypted).  Supply a stego-key
+to place the data by a secret-derived layout instead, leaving nothing to
+recognise; a wrong stego-key then looks the same as a clean image.
+
 Mode:
   -H, --hide               Encrypt SECRET and embed it into CARRIER
   -X, --extract            Recover and decrypt the payload from STEGO
@@ -52,6 +58,10 @@ Files:
   -i, --in <file>          Secret to hide, or stego PNG to read (default: -)
   -o, --output <file>      Where to write the result (default: -)
       --ratio <fraction>   Cap on samples modified, 0<r<=0.03 (default: 0.03)
+
+Stealth (independent of the gisp passphrase; never sent to gisp):
+      --stego-key <str>        Place data by a layout keyed with this secret
+      --stego-key-file <f>     Read the stego-key from file F (one line)
 
 Passphrase (passed straight through to gisp):
       --passphrase-fd <n>      Read the passphrase from file descriptor N
@@ -88,9 +98,13 @@ class Options:
         self.ratio = MAX_RATIO
         self.gisp = None
         self.quiet = False
+        # Stego-key: an independent placement secret, isolated from gisp.
+        self.stego_key = None             # literal string from --stego-key
+        self.stego_key_file = None        # path from --stego-key-file
         # gisp pass-through, collected verbatim.
         self.pass_opts = []
         self.pass_fd = None
+        self.pass_source = None            # "--passphrase-fd" | "--passphrase-file"
         self.kdf_opts = []
         self.ceil_opts = []
 
@@ -98,6 +112,7 @@ class Options:
 _LONG_OPTIONS = [
     "hide", "extract", "capacity",
     "carrier=", "in=", "output=", "ratio=",
+    "stego-key=", "stego-key-file=",
     "passphrase-fd=", "passphrase-file=",
     "opslimit=", "memlimit=",
     "max-opslimit=", "max-memlimit=", "max-filesize=",
@@ -111,6 +126,19 @@ def _set_mode(opts, mode):
         raise UsageError("options --hide, --extract and --capacity are "
                          "mutually exclusive")
     opts.mode = mode
+
+
+def _set_pass_source(opts, source):
+    """Record the passphrase source, rejecting a conflicting second one.
+
+    Guarding here rather than by inspecting the collected pass_opts makes the
+    check order-independent: --passphrase-fd and --passphrase-file conflict in
+    either order, while repeating the same option is harmless.
+    """
+    if opts.pass_source is not None and opts.pass_source != source:
+        raise UsageError(
+            "--passphrase-fd and --passphrase-file are mutually exclusive")
+    opts.pass_source = source
 
 
 def _positive_int(name, value):
@@ -173,11 +201,26 @@ def parse_args(argv):
             opts.gisp = value
         elif name in ("-q", "--quiet"):
             opts.quiet = True
+        # -- stego-key (sting's own placement secret; never sent to gisp) --
+        elif name == "--stego-key":
+            if opts.stego_key_file is not None:
+                raise UsageError("--stego-key and --stego-key-file are "
+                                 "mutually exclusive")
+            opts.stego_key = value
+            opts.stego_key_file = None
+        elif name == "--stego-key-file":
+            if opts.stego_key is not None:
+                raise UsageError("--stego-key and --stego-key-file are "
+                                 "mutually exclusive")
+            opts.stego_key_file = value
+            opts.stego_key = None
         # -- passphrase pass-through --
         elif name == "--passphrase-fd":
+            _set_pass_source(opts, "--passphrase-fd")
             opts.pass_fd = _positive_int("file descriptor", value)
             opts.pass_opts = ["--passphrase-fd", str(opts.pass_fd)]
         elif name == "--passphrase-file":
+            _set_pass_source(opts, "--passphrase-file")
             opts.pass_opts = ["--passphrase-file", value]
         # -- KDF pass-through (hide) --
         elif name in ("-p", "--opslimit"):
@@ -208,9 +251,6 @@ def parse_args(argv):
     if opts.mode == "hide" and is_stdio(opts.carrier) and is_stdio(opts.infile):
         raise UsageError(
             "carrier and secret cannot both read from standard input")
-    if opts.pass_fd is not None and "--passphrase-file" in opts.pass_opts:
-        raise UsageError(
-            "--passphrase-fd and --passphrase-file are mutually exclusive")
 
     # A "-" input reads standard input.  When that is an interactive terminal
     # the user almost certainly forgot -i/-c: gisp would prompt for the
@@ -245,22 +285,57 @@ def _reject_tty_input(path, role, option):
 # Mode handlers.
 # --------------------------------------------------------------------------
 
+def _resolve_stego_key(opts):
+    """Return the stego-key as bytes, or None when none was requested.
+
+    The literal --stego-key is taken as its UTF-8 bytes; --stego-key-file reads
+    the file and strips one trailing newline so `echo key > f` behaves as
+    expected.  An empty key is refused as a foot-gun.  This value is sting's
+    own and is never forwarded to gisp.
+    """
+    if opts.stego_key is not None:
+        key = opts.stego_key.encode("utf-8")
+    elif opts.stego_key_file is not None:
+        if is_stdio(opts.stego_key_file):
+            raise UsageError("--stego-key-file cannot read from standard input")
+        try:
+            with open(opts.stego_key_file, "rb") as handle:
+                key = handle.read()
+        except OSError as exc:
+            raise StingError("cannot read stego-key file %s: %s"
+                             % (opts.stego_key_file, exc))
+        if key.endswith(b"\r\n"):
+            key = key[:-2]
+        elif key.endswith((b"\n", b"\r")):
+            key = key[:-1]
+    else:
+        return None
+    if not key:
+        raise StingError("stego-key must not be empty")
+    return key
+
+
 def do_capacity(opts):
     carrier = load_carrier(read_bytes(opts.carrier), opts.quiet)
+    stego_key = _resolve_stego_key(opts)
+    hbits = header_bits(stego_material(stego_key))
     width, height = carrier.size
-    capacity = carrier.capacity_bytes(opts.ratio)
+    capacity = carrier.capacity_bytes(opts.ratio, hbits)
     sys.stdout.write(
         "carrier:  %dx%d %s\n"
         "usable:   %d samples\n"
         "ratio:    %.3f\n"
+        "mode:     %s\n"
         "capacity: %d bytes (payload after gisp encryption overhead)\n"
-        % (width, height, carrier.mode, carrier.n_usable,
-           opts.ratio, capacity))
+        % (width, height, carrier.mode, carrier.n_usable, opts.ratio,
+           "keyed (stealth)" if stego_key is not None else "open (detectable)",
+           capacity))
     return EXIT_OK
 
 
 def do_hide(opts):
     gisp = locate_gisp(opts.gisp)
+    stego_key = _resolve_stego_key(opts)
 
     # Decode the carrier up front so an unusable cover fails before we bother
     # the user for a passphrase.
@@ -272,20 +347,23 @@ def do_hide(opts):
     if not ciphertext:
         raise StingError("gisp produced no ciphertext")
 
-    stego = embed(carrier, ciphertext, opts.ratio)
+    stego = embed(carrier, ciphertext, opts.ratio, stego_key)
     write_bytes(opts.output, stego)
     if not opts.quiet:
+        hbits = header_bits(stego_material(stego_key))
         sys.stderr.write(
-            "%s: hid %d bytes in a %dx%d carrier (%.2f%% of samples used)\n"
+            "%s: hid %d bytes in a %dx%d carrier (%.2f%% of samples used, %s)\n"
             % (PROGRAM_NAME, len(ciphertext), carrier.size[0], carrier.size[1],
-               100.0 * (HDR_BITS + len(ciphertext) * 8) / carrier.n_usable))
+               100.0 * (hbits + len(ciphertext) * 8) / carrier.n_usable,
+               "keyed" if stego_key is not None else "open/detectable"))
     return EXIT_OK
 
 
 def do_extract(opts):
     gisp = locate_gisp(opts.gisp)
+    stego_key = _resolve_stego_key(opts)
     carrier = load_carrier(read_bytes(opts.infile), opts.quiet)
-    ciphertext = extract(carrier)
+    ciphertext = extract(carrier, stego_key)
     plaintext = gisp_decrypt(
         gisp, ciphertext, opts.pass_opts, opts.pass_fd, opts.ceil_opts,
         opts.quiet)

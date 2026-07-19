@@ -24,8 +24,6 @@ cycle.
 import os
 import sys
 
-import numpy as np
-
 
 # --------------------------------------------------------------------------
 # Program identity.
@@ -70,11 +68,19 @@ EXIT_USAGE = 2
 # the command line; a lower value may be requested for extra margin.
 MAX_RATIO = 0.03
 
-# Fixed header carried inside the image, laid out as (all big-endian):
+# Container format v2 has two on-image header layouts, chosen by whether a
+# stego-key is in use.  They are never confused because the *reader* selects
+# the mode: extraction with a stego-key only ever looks for a keyed header,
+# and extraction without one only ever looks for an open header.
+#
+# OPEN mode (no stego-key) -- DETECTABLE.  The header sits at a fixed, public
+# key and starts with a constant MAGIC, so anyone holding sting can locate it
+# and confirm a payload is present.  This mode exists for compatibility and
+# convenience; it provides NO stealth.  Layout (all big-endian):
 #
 #   offset  size  field
 #   ------  ----  ---------------------------------------------------------
-#      0      4   MAGIC     "STG1"
+#      0      4   MAGIC     "STG2"
 #      4      1   FLAGS     reserved, currently 0
 #      5      1   RESERVED  reserved, currently 0
 #      6     16   SEED      per-image nonce keying the payload permutation
@@ -84,26 +90,52 @@ MAX_RATIO = 0.03
 #
 # The CRC lets extraction reject a non-sting or damaged image *before* it
 # trusts the length field, and the MAGIC gives a fast "nothing here" answer.
-MAGIC = b"STG1"
+MAGIC = b"STG2"
 HDR_LEN = 34
 HDR_BITS = HDR_LEN * 8
 
+# KEYED mode (stego-key set) -- STEALTHY.  The header is located by a key
+# derived from the secret stego-key, so it cannot be found without it, and it
+# carries NO MAGIC and NO CRC: there is deliberately nothing to recognise.
+# Presence and correctness are proven only by gisp successfully decrypting the
+# recovered bytes.  Layout (all big-endian):
+#
+#   offset  size  field
+#   ------  ----  ---------------------------------------------------------
+#      0     16   SEED      per-image nonce, also mixed with the stego-key
+#     16      8   LENGTH    ciphertext length in bytes
+#   --------------------------------------------------------------------- 24
+KEYED_HDR_LEN = 24
+KEYED_HDR_BITS = KEYED_HDR_LEN * 8
+
 # Domain-separated keys for the deterministic permutations and +/-1
-# directions.  The header layout uses a fixed key so a reader can locate it
-# with nothing but the image; the payload layout is keyed by the per-image
-# SEED so its footprint differs for every carrier.
-KEY_HEADER_POS = b"sting/v1/header-position"
-KEY_HEADER_DIR = b"sting/v1/header-direction"
-KEY_PAYLOAD_POS = b"sting/v1/payload-position/"
-KEY_PAYLOAD_DIR = b"sting/v1/payload-direction/"
+# directions.
+#
+# OPEN mode: the header uses a fixed public key so a reader can locate it with
+# nothing but the image; the payload layout is keyed by the per-image SEED so
+# its footprint differs for every carrier (but is still locatable, since SEED
+# is read from the open header).
+KEY_HEADER_POS = b"sting/v2/open-header-position"
+KEY_HEADER_DIR = b"sting/v2/open-header-direction"
+KEY_PAYLOAD_POS = b"sting/v2/open-payload-position/"
+KEY_PAYLOAD_DIR = b"sting/v2/open-payload-direction/"
 
-# Refuse absurdly large carriers: the permutation materialises one 64-bit
-# sort key per usable sample, so this bounds peak memory to a sane figure.
-MAX_CARRIER_SAMPLES = 64_000_000
+# KEYED mode: every layout key is additionally bound to the secret stego-key
+# material, so neither the header nor the payload can be located without it.
+# The payload keys mix in both the stego-key material and the per-image SEED.
+STEGO_KEY_TAG = b"sting/v2/stego-key/"
+KEY_HEADER_POS_KEYED = b"sting/v2/keyed-header-position/"
+KEY_HEADER_DIR_KEYED = b"sting/v2/keyed-header-direction/"
+KEY_PAYLOAD_POS_KEYED = b"sting/v2/keyed-payload-position/"
+KEY_PAYLOAD_DIR_KEYED = b"sting/v2/keyed-payload-direction/"
 
-# Sort keys are read from the keystream as unsigned big-endian 64-bit
-# integers so a container is portable across machines of either byte order.
-U64_BE = np.dtype(">u8")
+# Refuse absurdly large carriers.  Placement no longer materialises a per-
+# sample sort key (the keyed permutation is now an on-demand Feistel network,
+# O(slots) in memory -- see keystream.py), so the peak-memory driver is instead
+# the carrier's own usable-index array, one int64 per usable sample.  This cap
+# bounds that array to ~1 GiB, which comfortably covers any real photographic
+# carrier while still refusing a decompression-bomb-sized input.
+MAX_CARRIER_SAMPLES = 128_000_000
 
 # Per-mode carrier description: (colour channel offsets, alpha offset|None).
 # These are the only PNG pixel modes sting embeds in directly; palette and

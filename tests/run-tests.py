@@ -27,6 +27,7 @@ import io
 import os
 import sys
 import tempfile
+import tracemalloc
 
 # Run against the in-tree package regardless of the working directory.
 _ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -39,7 +40,8 @@ from stinglib import backend, cli
 from stinglib.carrier import load_carrier
 from stinglib.constants import MAX_RATIO
 from stinglib.errors import StingError
-from stinglib.stego import embed, extract
+from stinglib.keystream import permutation_prefix
+from stinglib.stego import _header_slots, embed, extract, stego_material
 
 _failures = 0
 
@@ -132,6 +134,153 @@ def test_palette_promotion():
           extract(load_carrier(stego)) == secret)
 
 
+def _png_chunk_types(png):
+    """Return the list of chunk type tags present in a PNG byte string."""
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    types = []
+    i = 8
+    while i + 12 <= len(png):
+        length = int.from_bytes(png[i:i + 4], "big")
+        types.append(png[i + 4:i + 8])
+        i += 12 + length
+    return types
+
+
+def test_png_fingerprint():
+    # Build a cover that deliberately carries ancillary metadata chunks, then
+    # confirm the stego output has stripped every one of them and still decodes
+    # and extracts.
+    from PIL import PngImagePlugin
+    rng = np.random.default_rng(4)
+    arr = rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)
+    info = PngImagePlugin.PngInfo()
+    info.add_text("Software", "definitely-not-sting 9.9")
+    info.add_text("Comment", "hello")
+    buf = io.BytesIO()
+    Image.fromarray(arr, "RGB").save(buf, format="PNG", pnginfo=info,
+                                     dpi=(72, 72))
+    cover = buf.getvalue()
+    check("cover fixture actually has metadata",
+          any(t in _png_chunk_types(cover)
+              for t in (b"tEXt", b"iTXt", b"zTXt", b"pHYs", b"tIME")))
+
+    secret = os.urandom(40)
+    stego = embed(load_carrier(cover), secret, MAX_RATIO)
+    types = set(_png_chunk_types(stego))
+    telltale = {b"tEXt", b"iTXt", b"zTXt", b"tIME", b"gAMA", b"cHRM",
+                b"sRGB", b"iCCP", b"pHYs"}
+    check("stego output carries no ancillary/metadata chunks",
+          not (types & telltale))
+    check("stego output keeps only decode-essential chunks",
+          types.issubset({b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"}))
+    check("stripped stego still extracts",
+          extract(load_carrier(stego)) == secret)
+
+    # Colour type and bit depth are preserved across the modes.
+    depth_ok = True
+    for mode in ("L", "LA", "RGB", "RGBA"):
+        stego = embed(load_carrier(_png_bytes(mode, seed=5)), os.urandom(20),
+                      MAX_RATIO)
+        if load_carrier(stego).mode != mode:
+            depth_ok = False
+    check("stego preserves 8-bit colour type across modes", depth_ok)
+
+
+def test_stego_key():
+    key = b"correct-stego-key"
+    secret = os.urandom(120)
+    stego = embed(load_carrier(_png_bytes("RGB", seed=21)), secret, MAX_RATIO,
+                  stego_key=key)
+
+    # Same stego-key round-trips.
+    check("keyed stego round-trips",
+          extract(load_carrier(stego), stego_key=key) == secret)
+
+    # A keyed image carries no locatable open header (no MAGIC): open-mode
+    # extraction must report nothing found.
+    try:
+        extract(load_carrier(stego))
+        check("keyed image exposes no open header", False)
+    except StingError:
+        check("keyed image exposes no open header", True)
+
+    # A wrong stego-key is rejected exactly like a clean image + a key: same
+    # error text, so the two are indistinguishable.
+    msg_wrong = msg_clean = None
+    try:
+        extract(load_carrier(stego), stego_key=b"the-wrong-key")
+    except StingError as exc:
+        msg_wrong = str(exc)
+    try:
+        extract(load_carrier(_png_bytes("RGB", seed=99)), stego_key=key)
+    except StingError as exc:
+        msg_clean = str(exc)
+    check("wrong stego-key finds nothing",
+          msg_wrong is not None and msg_clean is not None)
+    check("wrong key and clean image are indistinguishable",
+          msg_wrong == msg_clean)
+
+    # An open-mode image is not readable with a stego-key, and vice versa.
+    open_stego = embed(load_carrier(_png_bytes("RGB", seed=21)), secret,
+                       MAX_RATIO)
+    try:
+        extract(load_carrier(open_stego), stego_key=key)
+        check("open image not readable with a key", False)
+    except StingError:
+        check("open image not readable with a key", True)
+
+    # Placement is genuinely key-dependent: header slots differ between two
+    # keys and between keyed and open modes.
+    n = load_carrier(_png_bytes("RGB", seed=21)).n_usable
+    ha = _header_slots(n, stego_material(b"A"))
+    hb = _header_slots(n, stego_material(b"B"))
+    ho = _header_slots(n, None)
+    check("stego-key changes header placement", not np.array_equal(ha, hb))
+    check("keyed placement differs from open", not np.array_equal(ha, ho))
+
+
+def test_feistel_permutation():
+    # A full-length prefix must be an exact permutation of range(n), for a
+    # spread of sizes including odd and power-of-two-adjacent edge cases.
+    bijection = True
+    for n in (1, 2, 3, 5, 8, 17, 256, 257, 4096, 10007):
+        p = permutation_prefix(b"k", n, n)
+        if sorted(p.tolist()) != list(range(n)):
+            bijection = False
+    check("keyed permutation is a bijection (many n)", bijection)
+
+    # Determinism across runs: same key + n + count -> identical output.
+    a = permutation_prefix(b"key", 1_000_000, 4000)
+    b = permutation_prefix(b"key", 1_000_000, 4000)
+    check("permutation is deterministic", np.array_equal(a, b))
+
+    # A short prefix equals the head of the full permutation.
+    full = permutation_prefix(b"key2", 5000, 5000)
+    pref = permutation_prefix(b"key2", 5000, 137)
+    check("prefix equals head of full permutation",
+          np.array_equal(pref, full[:137]))
+
+    # First k slots of a large carrier are unique and in range.
+    n, k = 60_000_000, 100_000
+    slots = permutation_prefix(b"payload", n, k)
+    check("first k slots unique and within [0, n)",
+          len(np.unique(slots)) == k
+          and int(slots.min()) >= 0 and int(slots.max()) < n)
+
+    # Distinct keys give distinct orders.
+    check("placement is key-dependent",
+          not np.array_equal(permutation_prefix(b"a", 100_000, 500),
+                             permutation_prefix(b"b", 100_000, 500)))
+
+    # Peak memory is O(slots), not O(n): reading 200k slots from a 100M-sample
+    # carrier must stay far below the ~800 MB the old full argsort needed.
+    tracemalloc.start()
+    permutation_prefix(b"mem", 100_000_000, 200_000)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    check("peak memory is O(slots) not O(n)", peak < 100_000_000)
+
+
 def test_full_cli_with_gisp():
     try:
         gisp = backend.locate_gisp(None)
@@ -157,6 +306,23 @@ def test_full_cli_with_gisp():
         ok = (rc == 0) and os.path.exists(out) and open(out, "rb").read() == data
         check("full gisp CLI round-trip", ok)
 
+        # The same round-trip in keyed (stealth) mode; the stego-key is a
+        # separate secret from the gisp passphrase.
+        kstego = os.path.join(d, "kstego.png")
+        kout = os.path.join(d, "kout.bin")
+        rc = cli.main(["-H", "-c", cover, "-i", secret, "-o", kstego,
+                       "--stego-key", "a-second-secret", "--passphrase-file",
+                       passf, "-q", "--gisp", gisp])
+        rc |= cli.main(["-X", "-i", kstego, "-o", kout, "--stego-key",
+                        "a-second-secret", "--passphrase-file", passf, "-q",
+                        "--gisp", gisp])
+        kok = (rc == 0) and os.path.exists(kout) \
+            and open(kout, "rb").read() == data
+        # Without the stego-key the same image yields nothing (exit 1).
+        rc_nokey = cli.main(["-X", "-i", kstego, "-o", os.devnull,
+                             "--passphrase-file", passf, "-q", "--gisp", gisp])
+        check("full gisp CLI round-trip (keyed)", kok and rc_nokey != 0)
+
 
 def main():
     test_roundtrip_modes()
@@ -164,6 +330,9 @@ def main():
     test_no_payload_and_tamper()
     test_capacity_exceeded()
     test_palette_promotion()
+    test_png_fingerprint()
+    test_stego_key()
+    test_feistel_permutation()
     test_full_cli_with_gisp()
     sys.stdout.write("\n%s\n" % ("all tests passed" if _failures == 0
                                  else "%d test(s) FAILED" % _failures))

@@ -32,19 +32,24 @@ from .errors import StingError
 
 
 def locate_gisp(explicit):
-    """Resolve the gisp executable, or raise StingError."""
-    candidates = []
-    if explicit:
-        candidates.append(explicit)
-    env = os.environ.get("STING_GISP")
-    if env:
-        candidates.append(env)
-    found = shutil.which("gisp")
-    if found:
-        candidates.append(found)
-    candidates.append(os.path.expanduser("~/Scripts/gisp/src/gisp"))
+    """Resolve the gisp executable, or raise StingError.
 
-    for path in candidates:
+    An explicitly requested backend (--gisp PATH or STING_GISP) is
+    authoritative: if it is given but unusable, sting fails loudly rather
+    than silently substituting a different gisp, since for a tool whose
+    value rests on a specific vetted crypto backend the identity of that
+    binary matters.  Only when no backend is requested does sting search
+    PATH and the well-known checkout location.
+    """
+    requested = explicit or os.environ.get("STING_GISP")
+    if requested:
+        if os.path.isfile(requested) and os.access(requested, os.X_OK):
+            return requested
+        raise StingError(
+            "requested gisp %r is not an executable file" % requested)
+
+    for path in (shutil.which("gisp"),
+                 os.path.expanduser("~/Scripts/gisp/src/gisp")):
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     raise StingError(

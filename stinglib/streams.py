@@ -23,6 +23,7 @@ temporary file and an atomic rename so a reader never sees a partial result.
 """
 
 import os
+import stat
 import sys
 import tempfile
 
@@ -46,6 +47,24 @@ def read_bytes(path):
                          % ("standard input" if is_stdio(path) else path, exc))
 
 
+def _is_regular_target(path):
+    """True when PATH names an ordinary file or does not exist yet.
+
+    A non-existent path is treated as regular: the caller will create it, and a
+    fresh regular file is exactly what the atomic rename produces.  Existing
+    non-regular targets (devices, FIFOs, and symlinks that resolve to them) are
+    written through directly instead.
+    """
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        # Unable to tell (e.g. a dangling symlink); let the write path try and
+        # surface any real error itself.
+        return True
+
+
 def write_bytes(path, data):
     """Write DATA to standard output, or atomically to a named file."""
     if is_stdio(path):
@@ -54,6 +73,20 @@ def write_bytes(path, data):
             sys.stdout.buffer.flush()
         except OSError as exc:
             raise StingError("cannot write to standard output: %s" % exc)
+        return
+
+    # The atomic temp-file-plus-rename below only makes sense for a regular
+    # file: for anything else (a character device like /dev/null, a FIFO, a
+    # symlink to one) there is no sibling directory to stage in and no partial
+    # result to hide, so write straight through instead of failing to create a
+    # temp file next to it.
+    if not _is_regular_target(path):
+        try:
+            with open(path, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+        except OSError as exc:
+            raise StingError("cannot write %s: %s" % (path, exc))
         return
 
     # Write to a sibling temporary file, flush to disk, then rename into
