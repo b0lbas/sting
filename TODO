@@ -28,15 +28,6 @@ Correctness
     a hard error; these should be too.  Repeating -p/-m likewise forwards
     --opslimit to gisp twice and relies on its last-wins behaviour.
 
-  * --ratio is accepted and silently ignored by --extract.  It is meaningful
-    only for --hide and --capacity; reject it elsewhere.
-
-  * --passphrase-fd 1 and 2 collide with the pipes Popen creates.  _run_gisp
-    sets stdout=PIPE and stderr=PIPE, so the child's descriptors 1 and 2 are
-    those pipes and pass_fds cannot preserve the caller's.  gisp would read the
-    passphrase from a pipe write-end.  Reject 1 and 2 up front; note also that
-    _positive_int is named for a positivity it does not enforce, accepting 0.
-
   * tools/highlight-payload crashes with a traceback on a trailing flag.  The
     hand-rolled parser calls bare next(it), so "--radius" with no value raises
     StopIteration out of main.

@@ -101,6 +101,7 @@ class Options:
         self.infile = "-"
         self.output = "-"
         self.ratio = MAX_RATIO
+        self.ratio_set = False             # True once --ratio is given
         self.gisp = None
         self.quiet = False
         # Stego-key: an independent placement secret, isolated from gisp.
@@ -151,7 +152,7 @@ def _positive_int(name, value):
         parsed = int(value, 10)
     except ValueError:
         parsed = -1
-    if parsed < 0:
+    if parsed <= 0:
         raise UsageError("invalid %s value: '%s'" % (name, value))
     return parsed
 
@@ -202,6 +203,7 @@ def parse_args(argv):
             if not (0.0 < opts.ratio <= MAX_RATIO):
                 raise UsageError(
                     "ratio must satisfy 0 < r <= %.3f" % MAX_RATIO)
+            opts.ratio_set = True
         elif name in ("-g", "--gisp"):
             opts.gisp = value
         elif name in ("-q", "--quiet"):
@@ -223,6 +225,14 @@ def parse_args(argv):
         elif name == "--passphrase-fd":
             _set_pass_source(opts, "--passphrase-fd")
             opts.pass_fd = _positive_int("file descriptor", value)
+            # _run_gisp captures gisp's stdout and stderr on descriptors 1 and
+            # 2, so pass_fds cannot preserve a caller's fd 1 or 2 across the
+            # fork: gisp would read the passphrase from a pipe write-end.
+            # Reject them up front rather than fail obscurely later.
+            if opts.pass_fd in (1, 2):
+                raise UsageError(
+                    "--passphrase-fd must not be 1 or 2; those descriptors are "
+                    "used for gisp's captured stdout and stderr")
             opts.pass_opts = ["--passphrase-fd", str(opts.pass_fd)]
         elif name == "--passphrase-file":
             _set_pass_source(opts, "--passphrase-file")
@@ -253,6 +263,11 @@ def parse_args(argv):
         raise UsageError("one of --hide, --extract or --capacity is required")
     if opts.mode in ("hide", "capacity") and not opts.carrier:
         raise UsageError("--carrier is required for this mode")
+    # --ratio caps how many samples an embedding touches; it has no meaning
+    # when recovering an existing payload.  Reject it rather than accept and
+    # silently ignore it.
+    if opts.ratio_set and opts.mode not in ("hide", "capacity"):
+        raise UsageError("--ratio applies only to --hide and --capacity")
     if opts.mode == "hide" and is_stdio(opts.carrier) and is_stdio(opts.infile):
         raise UsageError(
             "carrier and secret cannot both read from standard input")
