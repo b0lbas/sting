@@ -124,13 +124,6 @@ Refactoring and internal cleanup
     stinglib as a library picks up the host program's name for every
     diagnostic sting subsequently prints.
 
-Repository hygiene
-------------------
-
-  * Nine .pyc files are tracked in git and there is no .gitignore.  They churn
-    on every Python version bump, and "make clean" removes __pycache__ -- so
-    running the documented clean target stages nine deletions.
-
 --------------------------------------------------------------------------------
 
 Copyright (C) 2026 Uladzislau Bolbas <cmrtumilovic@gmail.com>
