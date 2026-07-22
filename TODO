@@ -28,10 +28,6 @@ Correctness
     a hard error; these should be too.  Repeating -p/-m likewise forwards
     --opslimit to gisp twice and relies on its last-wins behaviour.
 
-  * tools/highlight-payload crashes with a traceback on a trailing flag.  The
-    hand-rolled parser calls bare next(it), so "--radius" with no value raises
-    StopIteration out of main.
-
   * The BrokenPipeError handler may still emit shutdown noise.  cli.main closes
     sys.stdout, but the interpreter's final flush can print "Exception ignored
     in: <_io.BufferedWriter...>".  The usual remedy is an os.dup2 onto

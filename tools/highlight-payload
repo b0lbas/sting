@@ -61,6 +61,21 @@ class Args:
     pass
 
 
+def _optarg(it, name):
+    """Return NAME's value from the argument iterator, or die if it is last."""
+    try:
+        return next(it)
+    except StopIteration:
+        die("option %s requires a value" % name)
+
+
+def _number(convert, name, value):
+    try:
+        return convert(value)
+    except ValueError:
+        die("invalid %s value: '%s'" % (name, value))
+
+
 def parse_args(argv):
     a = Args()
     a.radius = 1
@@ -74,19 +89,19 @@ def parse_args(argv):
     positional = []
     for arg in it:
         if arg == "--radius":
-            a.radius = int(next(it))
+            a.radius = _number(int, arg, _optarg(it, arg))
         elif arg == "--dim":
-            a.dim = float(next(it))
+            a.dim = _number(float, arg, _optarg(it, arg))
         elif arg == "--lighten":
-            a.lighten = float(next(it))
+            a.lighten = _number(float, arg, _optarg(it, arg))
         elif arg == "--no-header":
             a.show_header = False
         elif arg == "--by-bit":
             a.by_bit = True
         elif arg == "--stego-key":
-            a.stego_key = next(it)
+            a.stego_key = _optarg(it, arg)
         elif arg == "--stego-key-file":
-            a.stego_key_file = next(it)
+            a.stego_key_file = _optarg(it, arg)
         elif arg in ("-h", "--help"):
             sys.stdout.write(__doc__)
             raise SystemExit(0)

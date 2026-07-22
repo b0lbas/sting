@@ -353,6 +353,39 @@ def test_feistel_permutation():
     check("peak memory is O(slots) not O(n)", peak < 100_000_000)
 
 
+def test_highlight_payload_parser():
+    """Malformed options must die with a message, not a traceback."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader(
+        "highlight_payload", os.path.join(_ROOT, "tools", "highlight-payload"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    hp = importlib.util.module_from_spec(spec)
+    loader.exec_module(hp)
+
+    bad = [
+        ["a.png", "b.png", "--radius"],        # trailing flag, no value
+        ["a.png", "b.png", "--stego-key"],
+        ["a.png", "b.png", "--radius", "x"],   # non-numeric value
+        ["a.png", "b.png", "--dim", "wide"],
+    ]
+    ok = True
+    stderr, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        for argv in bad:
+            try:
+                hp.parse_args(argv)
+                ok = False
+            except SystemExit as exc:
+                ok = ok and exc.code == 1
+        good = hp.parse_args(["a.png", "b.png", "--radius", "2", "--dim", ".5"])
+    finally:
+        sys.stderr = stderr
+    check("highlight-payload rejects malformed options", ok)
+    check("highlight-payload still accepts valid options",
+          good.radius == 2 and good.dim == 0.5 and good.src == "a.png")
+
+
 def test_full_cli_with_gisp():
     try:
         gisp = backend.locate_gisp(None)
@@ -407,6 +440,7 @@ def main():
     test_png_fingerprint()
     test_stego_key()
     test_feistel_permutation()
+    test_highlight_payload_parser()
     test_full_cli_with_gisp()
     sys.stdout.write("\n%s\n" % ("all tests passed" if _failures == 0
                                  else "%d test(s) FAILED" % _failures))
