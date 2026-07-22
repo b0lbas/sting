@@ -20,14 +20,6 @@ Correctness
     rather than its target.  The check and the action disagree about what the
     path means.  Decide which behaviour is wanted and make both agree.
 
-  * Repeated options silently take the last value.  "--stego-key a
-    --stego-key b" is accepted and uses b, which in a tool where a wrong
-    stego-key is designed to be indistinguishable from no payload means the
-    user gets the generic miss message and no hint why.  Every other conflict
-    (--stego-key vs --stego-key-file, --passphrase-fd vs --passphrase-file) is
-    a hard error; these should be too.  Repeating -p/-m likewise forwards
-    --opslimit to gisp twice and relies on its last-wins behaviour.
-
   * The BrokenPipeError handler may still emit shutdown noise.  cli.main closes
     sys.stdout, but the interpreter's final flush can print "Exception ignored
     in: <_io.BufferedWriter...>".  The usual remedy is an os.dup2 onto

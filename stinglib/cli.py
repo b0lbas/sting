@@ -175,6 +175,18 @@ def parse_args(argv):
     except getopt.GetoptError as exc:
         raise UsageError(str(exc))
 
+    # Options where a silently ignored first value would mislead: a repeated
+    # --stego-key means one of the two keys is quietly not used -- and a wrong
+    # stego-key is designed to look like no payload at all -- while repeated
+    # pass-through options would be forwarded to gisp twice, leaning on its
+    # last-wins behaviour.  Reject the repetition instead.
+    seen = set()
+
+    def once(canonical):
+        if canonical in seen:
+            raise UsageError("option %s given more than once" % canonical)
+        seen.add(canonical)
+
     for name, value in parsed:
         if name in ("-h", "--help"):
             sys.stdout.write(USAGE)
@@ -210,17 +222,17 @@ def parse_args(argv):
             opts.quiet = True
         # -- stego-key (sting's own placement secret; never sent to gisp) --
         elif name == "--stego-key":
+            once("--stego-key")
             if opts.stego_key_file is not None:
                 raise UsageError("--stego-key and --stego-key-file are "
                                  "mutually exclusive")
             opts.stego_key = value
-            opts.stego_key_file = None
         elif name == "--stego-key-file":
+            once("--stego-key-file")
             if opts.stego_key is not None:
                 raise UsageError("--stego-key and --stego-key-file are "
                                  "mutually exclusive")
             opts.stego_key_file = value
-            opts.stego_key = None
         # -- passphrase pass-through --
         elif name == "--passphrase-fd":
             _set_pass_source(opts, "--passphrase-fd")
@@ -239,23 +251,31 @@ def parse_args(argv):
             opts.pass_opts = ["--passphrase-file", value]
         # -- KDF pass-through (hide) --
         elif name in ("-p", "--opslimit"):
+            once("--opslimit")
             opts.kdf_opts += ["--opslimit", value]
         elif name in ("-m", "--memlimit"):
+            once("--memlimit")
             opts.kdf_opts += ["--memlimit", value]
         # -- ceilings pass-through (extract) --
         elif name == "--max-opslimit":
+            once("--max-opslimit")
             opts.ceil_opts += ["--max-opslimit", value]
         elif name == "--max-memlimit":
+            once("--max-memlimit")
             opts.ceil_opts += ["--max-memlimit", value]
         elif name == "--max-filesize":
+            once("--max-filesize")
             opts.ceil_opts += ["--max-filesize", value]
         # -- shared by both gisp directions --
         elif name == "--min-password-length":
+            once("--min-password-length")
             opts.kdf_opts += ["--min-password-length", value]
             opts.ceil_opts += ["--min-password-length", value]
         elif name == "--allow-weak-password":
-            opts.kdf_opts.append("--allow-weak-password")
-            opts.ceil_opts.append("--allow-weak-password")
+            # A repeated flag carries no ambiguity; just don't forward it twice.
+            if "--allow-weak-password" not in opts.kdf_opts:
+                opts.kdf_opts.append("--allow-weak-password")
+                opts.ceil_opts.append("--allow-weak-password")
 
     if extra:
         raise UsageError("unexpected argument: '%s'" % extra[0])

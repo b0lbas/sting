@@ -353,6 +353,35 @@ def test_feistel_permutation():
     check("peak memory is O(slots) not O(n)", peak < 100_000_000)
 
 
+def test_repeated_options_rejected():
+    """A repeated single-valued option is an error, not a silent last-wins."""
+    from stinglib.errors import UsageError
+    repeated = [
+        ["-H", "-c", "x.png", "--stego-key", "a", "--stego-key", "b"],
+        ["-H", "-c", "x.png", "--stego-key-file", "f", "--stego-key-file", "g"],
+        ["-H", "-c", "x.png", "-p", "2", "--opslimit", "3"],
+        ["-H", "-c", "x.png", "-m", "1", "-m", "2"],
+        ["-X", "--max-opslimit", "4", "--max-opslimit", "4"],
+        ["-X", "--max-memlimit", "1", "--max-memlimit", "2"],
+        ["-X", "--max-filesize", "1", "--max-filesize", "2"],
+        ["-X", "--min-password-length", "8", "--min-password-length", "9"],
+    ]
+    ok = True
+    for argv in repeated:
+        try:
+            cli.parse_args(argv)
+            ok = False
+        except UsageError:
+            pass
+    check("repeated single-valued options are rejected", ok)
+
+    # Repeating a boolean flag stays harmless and is forwarded only once.
+    opts = cli.parse_args(["-X", "-i", "s.png", "-q", "-q",
+                           "--allow-weak-password", "--allow-weak-password"])
+    check("repeated flags are forwarded once",
+          opts.ceil_opts.count("--allow-weak-password") == 1)
+
+
 def test_highlight_payload_parser():
     """Malformed options must die with a message, not a traceback."""
     import importlib.machinery
@@ -440,6 +469,7 @@ def main():
     test_png_fingerprint()
     test_stego_key()
     test_feistel_permutation()
+    test_repeated_options_rejected()
     test_highlight_payload_parser()
     test_full_cli_with_gisp()
     sys.stdout.write("\n%s\n" % ("all tests passed" if _failures == 0
