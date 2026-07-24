@@ -8,12 +8,6 @@ section.  Security reports go to the address in README, not here.
 Correctness
 -----------
 
-  * KeyboardInterrupt during proc.communicate() leaks the gisp child.
-    backend.py only catches OSError before calling proc.kill(), so Ctrl-C while
-    gisp is grinding through Argon2id propagates straight past and leaves the
-    subprocess running with the passphrase descriptor still open.  cli.main
-    catches the interrupt and exits, orphaning it.
-
   * write_bytes mishandles a symlinked output.  _is_regular_target uses
     os.stat, which follows the link, so a symlink to a regular file takes the
     atomic-rename path -- but os.replace then replaces the symlink itself

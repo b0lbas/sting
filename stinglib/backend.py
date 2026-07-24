@@ -93,6 +93,13 @@ def _run_gisp(argv, pass_fd, input_bytes, stdin_passthrough, quiet):
     except OSError as exc:
         proc.kill()
         raise StingError("gisp I/O failed: %s" % exc)
+    except BaseException:
+        # Ctrl-C while gisp grinds through Argon2id lands here; without the
+        # kill the child would outlive us with the passphrase descriptor
+        # still open.
+        proc.kill()
+        proc.wait()
+        raise
 
     if proc.returncode != 0:
         if err:
