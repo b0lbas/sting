@@ -75,6 +75,8 @@ Layout
       streams.py       stdin/stdout- and file-aware byte I/O
       cli.py           argument parsing and the mode handlers
     tests/run-tests.py self-test
+    tools/highlight-payload
+                     visualise which pixels of a stego image carry data
     sting.1          manual page
     Makefile         build/install
     TODO             known issues and intended work
